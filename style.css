@@ -1,31 +1,4 @@
 body {
-    font-family: 'Inter', sans-serif;
+    font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
     background-color: #f8fafc; /* slate-50 */
 }
-/* Custom color classes to match your diagram */
-/* Page Block - Blue (like in your diagram) */
-.color-page-block { background-color: #93c5fd; } /* light blue */
-.text-page-block { color: #1d4ed8; } /* blue-700 */
-.stroke-page-block { stroke: #dc2626; }
-.fill-page-block { fill: #1d4ed8; }
-.fill-page-light { fill: #93c5fd; } /* light blue for page areas */
-
-/* Board Items - Red (like in your diagram) */
-.color-board-item { background-color: #fca5a5; } /* light red */
-.text-board-item { color: #dc2626; } /* red-600 */
-.stroke-board-item { stroke: #dc2626; }
-.fill-board-item { fill: #dc2626; }
-.fill-board-light { fill: #fca5a5; } /* light red with transparency */
-
-/* Margin Items - Green (for margins/measurements) */
-.color-margin-item { background-color: #86efac; } /* light green */
-.text-margin-item { color: #16a34a; } /* green-600 */
-.stroke-margin-item { stroke: #16a34a; }
-.fill-margin-item { fill: #16a34a; }
-
-/* Calculated Items - Orange/Yellow (like spine in your diagram) */
-.color-calculated-item { background-color: #fed7aa; } /* light orange */
-.text-calculated-item { color: #ea580c; } /* orange-600 */
-.stroke-calculated-item { stroke: #ea580c; }
-.fill-calculated-item { fill: #ea580c; }
-.fill-calculated-light { fill: #fef3c7; } /* light yellow like spine in diagram */
