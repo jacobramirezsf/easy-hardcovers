@@ -14,10 +14,18 @@ const InputField = ({ id, label, value, onChange, colorClass }) => (
     </div>
 );
 
+// --- Shared Geometry ---
+// Fabric outline with 45° corner cuts that sit one board thickness away from each board corner.
+const fabricOutlinePath = (dims, x0 = 0, y0 = 0) => {
+    const c = Math.max(0, 2 * dims.fabricMargin - dims.boardT * Math.sqrt(2));
+    const w = dims.fabricW, h = dims.fabricH;
+    const pts = [[c, 0], [w - c, 0], [w, c], [w, h - c], [w - c, h], [c, h], [0, h - c], [0, c]];
+    return 'M ' + pts.map(([x, y]) => `${+(x0 + x).toFixed(3)} ${+(y0 + y).toFixed(3)}`).join(' L ') + ' Z';
+};
+
 // --- SVG Preview Component ---
 const FlatLayoutSVG = ({ dims }) => {
     if (dims.fabricW <= 0 || dims.fabricH <= 0) return null;
-    const cutOffset = 2 * dims.fabricMargin - dims.boardT * Math.sqrt(2);
 
     // --- Key Coordinates ---
     const leftBoardX = dims.fabricMargin;
@@ -37,7 +45,7 @@ const FlatLayoutSVG = ({ dims }) => {
 
             {/* --- Fabric Outline (Red) --- */}
             {/* --- Fabric Outline with Corner Cuts --- */}
-            <path d={`M ${cutOffset} 0 L ${dims.fabricW - cutOffset} 0 L ${dims.fabricW} ${cutOffset} L ${dims.fabricW} ${dims.fabricH - cutOffset} L ${dims.fabricW - cutOffset} ${dims.fabricH} L ${cutOffset} ${dims.fabricH} L 0 ${dims.fabricH - cutOffset} L 0 ${cutOffset} Z`} fill="#f4a9a8" className="stroke-page-block" strokeWidth="1.5"/>
+            <path d={fabricOutlinePath(dims)} fill="#f4a9a8" className="stroke-page-block" strokeWidth="1.5"/>
 
             {/* --- Cover Boards --- */}
             <g className="stroke-board-item" strokeWidth="1.5" fill="none" stroke="#22c55e">
@@ -96,6 +104,133 @@ const FlatLayoutSVG = ({ dims }) => {
                 <line x1={dims.fabricW - dims.fabricMargin} y1={dims.fabricH - dims.fabricMargin} x2={dims.fabricW - dims.fabricMargin + dims.boardT} y2={dims.fabricH - dims.fabricMargin + dims.boardT}/><text x={dims.fabricW - dims.fabricMargin + dims.boardT + 8} y={dims.fabricH - dims.fabricMargin + dims.boardT + 20} className="label-sm text-board-item" textAnchor="start">board th</text>
             </g>
         </svg>
+    );
+};
+
+// --- Laser Cut Export ---
+// Units are millimetres (width/height in mm, viewBox 1 unit = 1 mm) so files import at true scale.
+// Red = cut, blue = score; score lines come first so they run before pieces are cut free.
+const LASER_CUT = '#FF0000';
+const LASER_SCORE = '#0000FF';
+
+const rectPath = (x, y, w, h) => {
+    const f = n => +n.toFixed(3);
+    return `M ${f(x)} ${f(y)} H ${f(x + w)} V ${f(y + h)} H ${f(x)} Z`;
+};
+
+const buildLaserSvg = ({ width, height, cuts, scores = [] }, strokeWidth = 0.1) => {
+    const paths = (list) => list.map(d => `    <path d="${d}"/>`).join('\n');
+    const w = +width.toFixed(3), h = +height.toFixed(3);
+    return [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        `<svg xmlns="http://www.w3.org/2000/svg" width="${w}mm" height="${h}mm" viewBox="0 0 ${w} ${h}">`,
+        scores.length ? `  <g id="score" fill="none" stroke="${LASER_SCORE}" stroke-width="${strokeWidth}">\n${paths(scores)}\n  </g>` : '',
+        `  <g id="cut" fill="none" stroke="${LASER_CUT}" stroke-width="${strokeWidth}">\n${paths(cuts)}\n  </g>`,
+        '</svg>',
+    ].filter(Boolean).join('\n');
+};
+
+const buildLaserSheets = (dims, { spacing, guides }) => {
+    const { boardW, boardH, spineW, gutter, fabricMargin, fabricW, fabricH } = dims;
+
+    // Boards: front cover, spine, back cover in a row, `spacing` apart.
+    const spineX = spacing + boardW + spacing;
+    const backX = spineX + spineW + spacing;
+    const boards = {
+        width: backX + boardW + spacing,
+        height: boardH + 2 * spacing,
+        cuts: [
+            rectPath(spacing, spacing, boardW, boardH),
+            rectPath(spineX, spacing, spineW, boardH),
+            rectPath(backX, spacing, boardW, boardH),
+        ],
+    };
+
+    // Fabric: mitered outline, optional board placement guides matching the flat layout.
+    const fx = spacing + fabricMargin, fy = spacing + fabricMargin;
+    const fabric = {
+        width: fabricW + 2 * spacing,
+        height: fabricH + 2 * spacing,
+        cuts: [fabricOutlinePath(dims, spacing, spacing)],
+        scores: guides ? [
+            rectPath(fx, fy, boardW, boardH),
+            rectPath(fx + boardW + gutter, fy, spineW, boardH),
+            rectPath(fx + boardW + gutter + spineW + gutter, fy, boardW, boardH),
+        ] : [],
+    };
+
+    return { boards, fabric };
+};
+
+const downloadSvg = (svg, filename) => {
+    const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+};
+
+const LaserSheetCard = ({ title, sheet, filename, children }) => (
+    <div className="flex flex-col border border-slate-200 rounded-lg p-3">
+        <div className="flex items-baseline justify-between mb-2">
+            <h3 className="font-semibold text-slate-700">{title}</h3>
+            <span className="text-xs text-slate-500">{sheet.width.toFixed(1)} × {sheet.height.toFixed(1)} mm</span>
+        </div>
+        <div className="flex-grow flex items-center justify-center bg-slate-50 rounded p-2 h-48">
+            {/* Preview uses a heavier stroke so hairlines stay visible when scaled down */}
+            <img src={`data:image/svg+xml;charset=utf-8,${encodeURIComponent(buildLaserSvg(sheet, 1))}`} alt={`${title} preview`} className="max-w-full max-h-full object-contain"/>
+        </div>
+        <div className="text-xs text-slate-600 mt-2 space-y-0.5">{children}</div>
+        <button
+            type="button"
+            onClick={() => downloadSvg(buildLaserSvg(sheet), filename)}
+            className="mt-3 w-full py-2 rounded-md bg-slate-700 text-white text-sm font-medium hover:bg-slate-800 transition-colors"
+        >
+            Download SVG
+        </button>
+    </div>
+);
+
+const LaserCutPanel = ({ dims }) => {
+    const [spacing, setSpacing] = React.useState(5);
+    const [guides, setGuides] = React.useState(false);
+
+    const valid = [dims.boardW, dims.boardH, dims.spineW, dims.fabricW, dims.fabricH].every(n => n > 0);
+    if (!valid) {
+        return <p className="text-sm text-slate-500">Enter positive dimensions to generate laser cut files.</p>;
+    }
+
+    const { boards, fabric } = buildLaserSheets(dims, { spacing: Math.max(0, spacing), guides });
+    const mm = n => n.toFixed(1);
+
+    return (
+        <div>
+            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 mb-3 text-sm text-slate-600">
+                <label className="flex items-center gap-2">
+                    Spacing between pieces:
+                    <input type="number" min="0" value={spacing} onChange={e => setSpacing(parseFloat(e.target.value) || 0)} className="w-20 p-1.5 border border-slate-200 rounded-md"/>
+                    mm
+                </label>
+                <label className="flex items-center gap-2">
+                    <input type="checkbox" checked={guides} onChange={e => setGuides(e.target.checked)}/>
+                    Score board placement guides on fabric
+                </label>
+                <span className="text-xs text-slate-500">
+                    <span style={{ color: LASER_CUT }}>■</span> cut &nbsp; <span style={{ color: LASER_SCORE }}>■</span> score · 1 unit = 1 mm
+                </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                <LaserSheetCard title="Boards" sheet={boards} filename={`boards_${mm(dims.boardW)}x${mm(dims.boardH)}mm.svg`}>
+                    <p>2 × cover board: {mm(dims.boardW)} × {mm(dims.boardH)} mm</p>
+                    <p>1 × spine: {mm(dims.spineW)} × {mm(dims.boardH)} mm</p>
+                </LaserSheetCard>
+                <LaserSheetCard title="Fabric" sheet={fabric} filename={`fabric_${mm(dims.fabricW)}x${mm(dims.fabricH)}mm.svg`}>
+                    <p>1 × cover fabric: {mm(dims.fabricW)} × {mm(dims.fabricH)} mm, mitered corners</p>
+                    <p>{guides ? 'Placement guides included (blue): score at low power on the back side.' : 'Outline only.'}</p>
+                </LaserSheetCard>
+            </div>
+        </div>
     );
 };
 
@@ -222,6 +357,12 @@ const App = () => {
                             </div>
                         </div>
                     </div>
+                </div>
+
+                {/* Laser Cut Export */}
+                <div className="bg-white rounded-lg shadow-sm p-4 mt-3">
+                    <h2 className="text-lg font-semibold text-slate-700 border-b border-slate-200 pb-2 mb-3">Laser Cut Files</h2>
+                    <LaserCutPanel dims={dims} />
                 </div>
             </div>
         </div>
