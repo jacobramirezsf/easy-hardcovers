@@ -216,9 +216,92 @@ const downloadSvg = (svg, filename) => {
     URL.revokeObjectURL(url);
 };
 
-// --- UI Pieces ---
-const mm = n => n.toFixed(1);
+// --- Units ---
+// All maths and exports stay in millimetres; units only change what the user types and reads.
+const UNITS = {
+    mm: { factor: 1, label: 'mm', digits: 2 },
+    in: { factor: 25.4, label: 'in', digits: 3 },
+};
 
+// Accepts "5", "5.875", "5 7/8" or "7/8".
+const parseLength = (s) => {
+    const m = String(s).trim().match(/^(\d*\.?\d+)?\s*(?:(\d+)\s*\/\s*(\d+))?$/);
+    if (!m || (!m[1] && !m[2])) return NaN;
+    const whole = m[1] ? parseFloat(m[1]) : 0;
+    const frac = m[2] ? parseInt(m[2], 10) / parseInt(m[3], 10) : 0;
+    return whole + (Number.isFinite(frac) ? frac : NaN);
+};
+
+const formatValue = (mmVal, unit) => String(+(mmVal / UNITS[unit].factor).toFixed(UNITS[unit].digits));
+
+// Nearest 1/16", for reading off a ruler.
+const toFraction = (inches) => {
+    const n = Math.round(inches * 16);
+    const whole = Math.floor(n / 16);
+    let r = n - whole * 16, den = 16;
+    while (r && r % 2 === 0) { r /= 2; den /= 2; }
+    if (!r) return `${whole}`;
+    return whole ? `${whole} ${r}/${den}` : `${r}/${den}`;
+};
+
+const makeFormatters = (unit) => {
+    const f = UNITS[unit].factor;
+    const num = n => (n / f).toFixed(unit === 'in' ? 2 : 1);
+    return {
+        unit: UNITS[unit].label,
+        num,
+        len: n => `${num(n)} ${UNITS[unit].label}`,
+        size: (w, h) => `${num(w)} × ${num(h)} ${UNITS[unit].label}`,
+        // Math breakdown: inputs shown as typed, without trailing zeros.
+        raw: n => String(+(n / f).toFixed(3)),
+    };
+};
+
+// --- Saved Measurements ---
+const DEFAULTS = { pageWidth: 150, pageHeight: 230, blockThickness: 20, boardThickness: 2.5, coverMargin: 3, fabricMargin: 20 };
+const KEYS = Object.keys(DEFAULTS);
+const URL_PARAMS = { pageWidth: 'w', pageHeight: 'h', blockThickness: 't', boardThickness: 'b', coverMargin: 'o', fabricMargin: 'ti' };
+const LAST_KEY = 'easy-hardcovers:last';
+const BOOKS_KEY = 'easy-hardcovers:books';
+
+// Storage can be unavailable (private windows, blocked site data); the page still works without it.
+const storage = {
+    get(key, fallback) {
+        try { const v = JSON.parse(localStorage.getItem(key)); return v ?? fallback; } catch { return fallback; }
+    },
+    set(key, value) {
+        try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+    },
+};
+
+const cleanMeasurements = (src) =>
+    Object.fromEntries(KEYS.map(k => {
+        const v = parseFloat(src?.[k]);
+        return [k, Number.isFinite(v) && v >= 0 ? v : DEFAULTS[k]];
+    }));
+
+// A link with measurements wins, then the last session, then defaults.
+const loadInitialState = () => {
+    const q = new URLSearchParams(window.location.search);
+    let mmVals, unit;
+    if (KEYS.some(k => q.has(URL_PARAMS[k]))) {
+        mmVals = cleanMeasurements(Object.fromEntries(KEYS.map(k => [k, q.get(URL_PARAMS[k])])));
+        unit = q.get('u');
+    } else {
+        const last = storage.get(LAST_KEY, null);
+        mmVals = cleanMeasurements(last?.mm ?? DEFAULTS);
+        unit = last?.unit;
+    }
+    unit = UNITS[unit] ? unit : 'mm';
+    return { unit, mm: mmVals, text: Object.fromEntries(KEYS.map(k => [k, formatValue(mmVals[k], unit)])) };
+};
+
+const shareQuery = (mmVals, unit) =>
+    new URLSearchParams([...KEYS.map(k => [URL_PARAMS[k], String(+mmVals[k].toFixed(3))]), ['u', unit]]).toString();
+
+const sameMeasurements = (a, b) => KEYS.every(k => Math.abs(a[k] - b[k]) < 1e-6);
+
+// --- UI Pieces ---
 const Step = ({ n, title, subtitle, id, children }) => (
     <section id={id} className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 sm:p-5 scroll-mt-4">
         <div className="flex items-start gap-3 mb-4">
@@ -232,33 +315,103 @@ const Step = ({ n, title, subtitle, id, children }) => (
     </section>
 );
 
-const Field = ({ k, label, term, hint, color, value, onChange, onFocusKey, onHoverKey }) => (
-    <div onMouseEnter={() => onHoverKey(k)} onMouseLeave={() => onHoverKey(null)}>
-        <label htmlFor={k} className="flex items-baseline gap-2 text-sm font-medium text-slate-700">
-            <span className="w-2.5 h-2.5 rounded-full flex-shrink-0 self-center" style={{ background: color }}></span>
-            {label}
-            {term && <span className="text-xs font-normal text-slate-400">{term}</span>}
-        </label>
-        <div className="mt-1 flex items-center rounded-md border border-slate-300 bg-white focus-within:ring-2 focus-within:ring-indigo-300 focus-within:border-indigo-400">
-            <input
-                id={k} type="number" inputMode="decimal" min="0" step="0.1"
-                value={value}
-                onChange={e => onChange(k, e.target.value)}
-                onFocus={() => onFocusKey(k)}
-                onBlur={() => onFocusKey(null)}
-                className="w-full p-2 rounded-l-md bg-transparent outline-none"
-            />
-            <span className="px-3 text-sm text-slate-400">mm</span>
+const Field = ({ k, label, term, hint, color, value, unit, onChange, onFocusKey, onHoverKey }) => {
+    const invalid = value.trim() !== '' && !Number.isFinite(parseLength(value));
+    return (
+        <div onMouseEnter={() => onHoverKey(k)} onMouseLeave={() => onHoverKey(null)}>
+            <label htmlFor={k} className="flex items-baseline gap-2 text-sm font-medium text-slate-700">
+                <span className="w-2.5 h-2.5 rounded-full flex-shrink-0 self-center" style={{ background: color }}></span>
+                {label}
+                {term && <span className="text-xs font-normal text-slate-400">{term}</span>}
+            </label>
+            <div className={`mt-1 flex items-center rounded-md border bg-white focus-within:ring-2 ${invalid ? 'border-red-400 focus-within:ring-red-200' : 'border-slate-300 focus-within:ring-indigo-300 focus-within:border-indigo-400'}`}>
+                <input
+                    id={k} type="text" inputMode="decimal" autoComplete="off"
+                    value={value}
+                    onChange={e => onChange(k, e.target.value)}
+                    onFocus={() => onFocusKey(k)}
+                    onBlur={() => onFocusKey(null)}
+                    aria-invalid={invalid}
+                    className="w-full p-2 rounded-l-md bg-transparent outline-none"
+                />
+                <span className="px-3 text-sm text-slate-400">{unit}</span>
+            </div>
+            <p className={`mt-1 text-xs ${invalid ? 'text-red-600' : 'text-slate-500'}`}>
+                {invalid ? (unit === 'in' ? 'Enter a number like 5.875 or 5 7/8.' : 'Enter a number like 150 or 2.5.') : hint}
+            </p>
         </div>
-        <p className="mt-1 text-xs text-slate-500">{hint}</p>
+    );
+};
+
+const UnitToggle = ({ unit, onChange }) => (
+    <div role="radiogroup" aria-label="Units" className="inline-flex rounded-lg border border-slate-300 bg-white p-0.5 text-sm font-medium">
+        {Object.keys(UNITS).map(u => (
+            <button
+                key={u} type="button" role="radio" aria-checked={unit === u}
+                onClick={() => onChange(u)}
+                className={`px-3 py-1 rounded-md transition-colors ${unit === u ? 'bg-slate-800 text-white' : 'text-slate-600 hover:bg-slate-100'}`}
+            >
+                {u === 'mm' ? 'Millimetres' : 'Inches'}
+            </button>
+        ))}
     </div>
 );
 
-const LaserSheetCard = ({ title, sheet, filename, primary, children }) => (
+const SavedBooks = ({ books, current, onSave, onLoad, onDelete }) => {
+    const [name, setName] = React.useState('');
+    const [copied, setCopied] = React.useState(false);
+
+    const save = (e) => {
+        e.preventDefault();
+        if (name.trim()) { onSave(name.trim()); setName(''); }
+    };
+    const copyLink = async () => {
+        try {
+            await navigator.clipboard.writeText(window.location.href);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        } catch {
+            window.prompt('Copy this link:', window.location.href);
+        }
+    };
+
+    return (
+        <div className="bg-white rounded-xl shadow-sm border border-slate-200 px-4 py-3 mb-4 flex flex-col md:flex-row md:items-center gap-3">
+            <div className="flex flex-wrap items-center gap-2 flex-grow min-w-0">
+                <span className="text-sm font-semibold text-slate-700 mr-1">Saved books</span>
+                {books.length === 0 && <span className="text-sm text-slate-400">None yet. Name your measurements to save them in this browser.</span>}
+                {books.map(b => {
+                    const isCurrent = sameMeasurements(b.mm, current);
+                    return (
+                        <span key={b.name} className={`inline-flex items-center rounded-full border text-sm ${isCurrent ? 'border-indigo-400 bg-indigo-50 text-indigo-800' : 'border-slate-300 text-slate-700'}`}>
+                            <button type="button" onClick={() => onLoad(b)} className="pl-3 pr-1 py-1 hover:underline" title={`Load ${b.name}`}>{b.name}</button>
+                            <button type="button" onClick={() => onDelete(b.name)} className="px-2 py-1 text-slate-400 hover:text-red-600" aria-label={`Delete ${b.name}`}>×</button>
+                        </span>
+                    );
+                })}
+            </div>
+            <div className="flex flex-wrap items-center gap-2">
+                <form onSubmit={save} className="flex items-center gap-2">
+                    <input
+                        value={name} onChange={e => setName(e.target.value)} maxLength={60}
+                        placeholder="Name, e.g. A5 sketchbook" aria-label="Book name"
+                        className="w-48 p-1.5 text-sm border border-slate-300 rounded-md"
+                    />
+                    <button type="submit" disabled={!name.trim()} className="px-3 py-1.5 text-sm font-medium rounded-md bg-slate-800 text-white hover:bg-slate-900 disabled:opacity-40">Save</button>
+                </form>
+                <button type="button" onClick={copyLink} className="px-3 py-1.5 text-sm font-medium rounded-md border border-slate-300 text-slate-700 hover:bg-slate-50">
+                    {copied ? 'Link copied' : 'Copy link'}
+                </button>
+            </div>
+        </div>
+    );
+};
+
+const LaserSheetCard = ({ title, sheet, filename, primary, fmt, children }) => (
     <div className="flex flex-col border border-slate-200 rounded-lg p-3">
         <div className="flex items-baseline justify-between mb-2">
             <h3 className="font-semibold text-slate-700">{title}</h3>
-            <span className="text-xs text-slate-500">sheet {mm(sheet.width)} × {mm(sheet.height)} mm</span>
+            <span className="text-xs text-slate-500">sheet {fmt.size(sheet.width, sheet.height)}</span>
         </div>
         <div className="flex items-center justify-center bg-slate-50 rounded p-2 h-44">
             {/* Preview uses a heavier stroke so hairlines stay visible when scaled down */}
@@ -275,34 +428,46 @@ const LaserSheetCard = ({ title, sheet, filename, primary, children }) => (
     </div>
 );
 
-const LaserCutPanel = ({ dims }) => {
-    const [spacing, setSpacing] = React.useState(5);
+const LaserCutPanel = ({ dims, unit }) => {
+    const fmt = makeFormatters(unit);
+    const [spacing, setSpacing] = React.useState({ mm: 5, text: formatValue(5, unit) });
     const [guides, setGuides] = React.useState(false);
-    const { boards, fabric } = buildLaserSheets(dims, { spacing: Math.max(0, spacing), guides });
+
+    React.useEffect(() => {
+        setSpacing(s => ({ ...s, text: formatValue(s.mm, unit) }));
+    }, [unit]);
+
+    const onSpacing = (text) => {
+        const n = parseLength(text);
+        setSpacing(s => ({ text, mm: Number.isFinite(n) ? n * UNITS[unit].factor : s.mm }));
+    };
+
+    const { boards, fabric } = buildLaserSheets(dims, { spacing: spacing.mm, guides });
+    const name = (w, h) => `${+w.toFixed(1)}x${+h.toFixed(1)}mm`;
 
     return (
         <div>
             <ol className="text-sm text-slate-600 space-y-1 mb-4 list-decimal list-inside">
-                <li>Download the <strong>boards</strong> file and cut it from board stock that is <strong>{dims.boardT} mm</strong> thick.</li>
-                <li>Import at <strong>100% / 1:1 scale</strong>; the file is in millimetres.</li>
+                <li>Download the <strong>boards</strong> file and cut it from board stock that is <strong>{fmt.len(dims.boardT)}</strong> thick.</li>
+                <li>Import at <strong>100% / 1:1 scale</strong>. The files are always true size{unit === 'in' && ' (saved in millimetres, which laser software converts automatically)'}.</li>
                 <li><span className="font-semibold" style={{ color: LASER_CUT }}>Red</span> lines are cuts{guides && <>, <span className="font-semibold" style={{ color: LASER_SCORE }}>blue</span> lines are light scores</>}. Check the sheet size fits your laser bed.</li>
                 <li>Cutting cloth on the laser too? Use the <strong>fabric</strong> file, or print it as a template to cut by hand.</li>
             </ol>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <LaserSheetCard title="Boards" primary sheet={boards} filename={`boards_${mm(dims.boardW)}x${mm(dims.boardH)}mm.svg`}>
-                    <p>2 × cover board, {mm(dims.boardW)} × {mm(dims.boardH)} mm</p>
-                    <p>1 × spine, {mm(dims.spineW)} × {mm(dims.boardH)} mm</p>
+                <LaserSheetCard title="Boards" primary fmt={fmt} sheet={boards} filename={`boards_${name(dims.boardW, dims.boardH)}.svg`}>
+                    <p>2 × cover board, {fmt.size(dims.boardW, dims.boardH)}</p>
+                    <p>1 × spine, {fmt.size(dims.spineW, dims.boardH)}</p>
                 </LaserSheetCard>
-                <LaserSheetCard title="Fabric" sheet={fabric} filename={`fabric_${mm(dims.fabricW)}x${mm(dims.fabricH)}mm.svg`}>
-                    <p>1 × cover cloth, {mm(dims.fabricW)} × {mm(dims.fabricH)} mm, corners cut</p>
+                <LaserSheetCard title="Fabric" fmt={fmt} sheet={fabric} filename={`fabric_${name(dims.fabricW, dims.fabricH)}.svg`}>
+                    <p>1 × cover cloth, {fmt.size(dims.fabricW, dims.fabricH)}, corners cut</p>
                     <p>{guides ? 'Includes board placement guides (blue): score at low power on the back side.' : 'Outline only.'}</p>
                 </LaserSheetCard>
             </div>
             <div className="flex flex-wrap items-center gap-x-6 gap-y-2 mt-3 text-sm text-slate-600">
                 <label className="flex items-center gap-2">
                     Gap between pieces
-                    <input type="number" min="0" value={spacing} onChange={e => setSpacing(parseFloat(e.target.value) || 0)} className="w-16 p-1.5 border border-slate-300 rounded-md"/>
-                    mm
+                    <input type="text" inputMode="decimal" value={spacing.text} onChange={e => onSpacing(e.target.value)} className="w-16 p-1.5 border border-slate-300 rounded-md"/>
+                    {fmt.unit}
                 </label>
                 <label className="flex items-center gap-2">
                     <input type="checkbox" checked={guides} onChange={e => setGuides(e.target.checked)}/>
@@ -322,60 +487,89 @@ const FIELDS = {
     ],
     materials: [
         { k: 'boardThickness', label: 'Board thickness', hint: 'Measure your greyboard or chipboard, ideally with calipers.', color: C.board },
-        { k: 'coverMargin', label: 'Overhang', term: 'cover margin', hint: 'How far the cover sticks out past the pages at the top, bottom and front. 3 mm is typical.', color: C.overhang },
-        { k: 'fabricMargin', label: 'Turn-in', term: 'fabric margin', hint: 'Extra cloth around the boards that folds over to the inside. 15–20 mm is typical.', color: C.fabric },
+        { k: 'coverMargin', label: 'Overhang', term: 'cover margin', hint: 'How far the cover sticks out past the pages at the top, bottom and front. 3 mm (⅛″) is typical.', color: C.overhang },
+        { k: 'fabricMargin', label: 'Turn-in', term: 'fabric margin', hint: 'Extra cloth around the boards that folds over to the inside. 15–20 mm (⅝–¾″) is typical.', color: C.fabric },
     ],
 };
 
 const App = () => {
-    const [inputs, setInputs] = React.useState({
-        pageWidth: '150', pageHeight: '230', blockThickness: '20',
-        boardThickness: '2.5', coverMargin: '3', fabricMargin: '20',
+    const [state, setState] = React.useState(loadInitialState);
+    const [books, setBooks] = React.useState(() => {
+        const saved = storage.get(BOOKS_KEY, []);
+        return Array.isArray(saved) ? saved.filter(b => b && typeof b.name === 'string' && b.mm) : [];
     });
     const [focusKey, setFocusKey] = React.useState(null);
     const [hoverKey, setHoverKey] = React.useState(null);
     const active = hoverKey || focusKey;
+    const { unit } = state;
+    const fmt = makeFormatters(unit);
 
-    // Keep raw strings so values like "2." can be typed; parse for the maths.
-    const num = Object.fromEntries(Object.entries(inputs).map(([k, v]) => [k, Math.max(0, parseFloat(v) || 0)]));
-    const d = computeDims(num);
-    const onChange = (k, v) => setInputs(prev => ({ ...prev, [k]: v }));
+    // Keep the address bar and the last session in sync, so a refresh, bookmark or shared link restores these numbers.
+    React.useEffect(() => {
+        storage.set(LAST_KEY, { mm: state.mm, unit });
+        window.history.replaceState(null, '', `${window.location.pathname}?${shareQuery(state.mm, unit)}`);
+    }, [state.mm, unit]);
+    React.useEffect(() => storage.set(BOOKS_KEY, books), [books]);
 
+    const onChange = (k, text) => setState(s => {
+        const n = parseLength(text);
+        return { ...s, text: { ...s.text, [k]: text }, mm: { ...s.mm, [k]: Number.isFinite(n) ? n * UNITS[s.unit].factor : 0 } };
+    });
+    const setUnit = (u) => setState(s => ({ ...s, unit: u, text: Object.fromEntries(KEYS.map(k => [k, formatValue(s.mm[k], u)])) }));
+    const loadBook = (b) => {
+        const mmVals = cleanMeasurements(b.mm);
+        const u = UNITS[b.unit] ? b.unit : unit;
+        setState({ unit: u, mm: mmVals, text: Object.fromEntries(KEYS.map(k => [k, formatValue(mmVals[k], u)])) });
+    };
+    const saveBook = (name) => setBooks(list => [{ name, mm: state.mm, unit, savedAt: Date.now() }, ...list.filter(b => b.name !== name)]);
+    const deleteBook = (name) => setBooks(list => list.filter(b => b.name !== name));
+
+    const d = computeDims(state.mm);
     const valid = d.pageW > 0 && d.pageH > 0 && d.blockT > 0 && d.boardT > 0 && d.boardW > 0;
     const warnings = [];
     if (!valid) warnings.push('Fill in every measurement above zero to see your cover.');
     else if (d.fabricMargin <= d.boardT) warnings.push('The turn-in is smaller than the board thickness, so the cloth won\'t reach the inside of the boards.');
 
-    const fieldProps = { onChange, onFocusKey: setFocusKey, onHoverKey: setHoverKey };
+    const fieldProps = { unit: fmt.unit, onChange, onFocusKey: setFocusKey, onHoverKey: setHoverKey };
+    const ruler = (w, h) => unit === 'in' ? `≈ ${toFraction(w / 25.4)}${h != null ? ` × ${toFraction(h / 25.4)}` : ''}″` : null;
     const cutList = [
-        { key: 'boardW', color: C.board, name: 'Cover boards', qty: 2, size: `${mm(d.boardW)} × ${mm(d.boardH)} mm`, from: 'board' },
-        { key: 'spine', color: C.spine, name: 'Spine board', qty: 1, size: `${mm(d.spineW)} × ${mm(d.boardH)} mm`, from: 'board' },
-        { key: 'fabric', color: C.fabric, name: 'Cover cloth', qty: 1, size: `${mm(d.fabricW)} × ${mm(d.fabricH)} mm`, from: 'cloth' },
-        { key: 'gutter', color: C.gutter, name: 'Hinge gap (g)', qty: null, size: `${mm(d.gutter)} mm`, from: 'leave between spine and each board when gluing' },
+        { key: 'boardW', color: C.board, name: 'Cover boards', qty: 2, size: fmt.size(d.boardW, d.boardH), ruler: ruler(d.boardW, d.boardH), from: 'board' },
+        { key: 'spine', color: C.spine, name: 'Spine board', qty: 1, size: fmt.size(d.spineW, d.boardH), ruler: ruler(d.spineW, d.boardH), from: 'board' },
+        { key: 'fabric', color: C.fabric, name: 'Cover cloth', qty: 1, size: fmt.size(d.fabricW, d.fabricH), ruler: ruler(d.fabricW, d.fabricH), from: 'cloth' },
+        { key: 'gutter', color: C.gutter, name: 'Hinge gap (g)', qty: null, size: fmt.len(d.gutter), ruler: ruler(d.gutter), from: 'leave between spine and each board when gluing' },
     ];
+    const r = fmt.raw, n = fmt.num;
 
     return (
         <div className="min-h-screen bg-slate-50 px-3 py-4 sm:px-6">
             <div className="max-w-7xl mx-auto">
-                <header className="mb-5">
-                    <h1 className="text-2xl sm:text-3xl font-bold text-slate-800">Book Cover Calculator</h1>
-                    <p className="mt-1 text-sm text-slate-500">
-                        Measure your pages, enter your materials, then download cut files for the laser.
-                        Hover or click any measurement to see where it goes on the diagrams.
-                    </p>
+                <header className="mb-4 flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3">
+                    <div>
+                        <h1 className="text-2xl sm:text-3xl font-bold text-slate-800">Book Cover Calculator</h1>
+                        <p className="mt-1 text-sm text-slate-500">
+                            Measure your pages, enter your materials, then download cut files for the laser.
+                            Hover or click any measurement to see where it goes on the diagrams.
+                        </p>
+                    </div>
+                    <div className="flex flex-col items-start sm:items-end gap-1 flex-shrink-0">
+                        <UnitToggle unit={unit} onChange={setUnit}/>
+                        {unit === 'in' && <span className="text-xs text-slate-500">Fractions like 5 7/8 work too.</span>}
+                    </div>
                 </header>
+
+                <SavedBooks books={books} current={state.mm} onSave={saveBook} onLoad={loadBook} onDelete={deleteBook}/>
 
                 <div className="grid grid-cols-1 lg:grid-cols-[minmax(300px,360px)_1fr] gap-4 items-start">
                     {/* Inputs stay in view while scrolling to the downloads */}
                     <div className="space-y-4 lg:sticky lg:top-4">
                         <Step n="1" title="Measure your text block" subtitle="The stack of sewn or glued pages, before it has a cover.">
                             <div className="space-y-4">
-                                {FIELDS.block.map(f => <Field key={f.k} {...f} {...fieldProps} value={inputs[f.k]}/>)}
+                                {FIELDS.block.map(f => <Field key={f.k} {...f} {...fieldProps} value={state.text[f.k]}/>)}
                             </div>
                         </Step>
                         <Step n="2" title="Your materials">
                             <div className="space-y-4">
-                                {FIELDS.materials.map(f => <Field key={f.k} {...f} {...fieldProps} value={inputs[f.k]}/>)}
+                                {FIELDS.materials.map(f => <Field key={f.k} {...f} {...fieldProps} value={state.text[f.k]}/>)}
                             </div>
                         </Step>
                     </div>
@@ -397,25 +591,26 @@ const App = () => {
 
                                 <h3 className="text-sm font-semibold text-slate-700 mt-5 mb-2">Cut list</h3>
                                 <div className="divide-y divide-slate-100 border border-slate-200 rounded-lg text-sm">
-                                    {cutList.map(r => (
-                                        <div key={r.key} onMouseEnter={() => setHoverKey(r.key)} onMouseLeave={() => setHoverKey(null)}
-                                             className={`flex flex-wrap items-baseline gap-x-3 px-3 py-2 transition-colors ${active === r.key ? 'bg-slate-50' : ''}`}>
-                                            <span className="w-2.5 h-2.5 rounded-full self-center" style={{ background: r.color }}></span>
-                                            <span className="font-medium text-slate-800 min-w-[9rem]">{r.qty ? `${r.qty} × ` : ''}{r.name}</span>
-                                            <span className="font-mono text-slate-800">{r.size}</span>
-                                            <span className="text-slate-500 text-xs">{r.qty ? `from ${r.from}` : r.from}</span>
+                                    {cutList.map(row => (
+                                        <div key={row.key} onMouseEnter={() => setHoverKey(row.key)} onMouseLeave={() => setHoverKey(null)}
+                                             className={`flex flex-wrap items-baseline gap-x-3 px-3 py-2 transition-colors ${active === row.key ? 'bg-slate-50' : ''}`}>
+                                            <span className="w-2.5 h-2.5 rounded-full self-center" style={{ background: row.color }}></span>
+                                            <span className="font-medium text-slate-800 min-w-[9rem]">{row.qty ? `${row.qty} × ` : ''}{row.name}</span>
+                                            <span className="font-mono text-slate-800">{row.size}</span>
+                                            {row.ruler && <span className="font-mono text-xs text-slate-500">{row.ruler}</span>}
+                                            <span className="text-slate-500 text-xs">{row.qty ? `from ${row.from}` : row.from}</span>
                                         </div>
                                     ))}
                                 </div>
 
                                 <details className="mt-3 text-sm text-slate-600">
-                                    <summary className="cursor-pointer text-slate-500 hover:text-slate-700">Show the math</summary>
+                                    <summary className="cursor-pointer text-slate-500 hover:text-slate-700">Show the math ({fmt.unit})</summary>
                                     <div className="mt-2 grid sm:grid-cols-2 gap-2 font-mono text-xs">
-                                        <p className="bg-slate-50 rounded p-2">board w = width − thickness/2 + overhang<br/>= {d.pageW} − {d.blockT}/2 + {d.coverMargin} = <strong>{mm(d.boardW)}</strong></p>
-                                        <p className="bg-slate-50 rounded p-2">board h = height + 2 × overhang<br/>= {d.pageH} + 2×{d.coverMargin} = <strong>{mm(d.boardH)}</strong></p>
-                                        <p className="bg-slate-50 rounded p-2">s = thickness + 2 × board<br/>= {d.blockT} + 2×{d.boardT} = <strong>{mm(d.spineW)}</strong></p>
-                                        <p className="bg-slate-50 rounded p-2">g = thickness/2 + board<br/>= {d.blockT}/2 + {d.boardT} = <strong>{mm(d.gutter)}</strong></p>
-                                        <p className="bg-slate-50 rounded p-2 sm:col-span-2">cloth w = 2 × board w + s + 2 × g + 2 × turn-in<br/>= 2×{mm(d.boardW)} + {mm(d.spineW)} + 2×{mm(d.gutter)} + 2×{d.fabricMargin} = <strong>{mm(d.fabricW)}</strong></p>
+                                        <p className="bg-slate-50 rounded p-2">board w = width − thickness/2 + overhang<br/>= {r(d.pageW)} − {r(d.blockT)}/2 + {r(d.coverMargin)} = <strong>{n(d.boardW)}</strong></p>
+                                        <p className="bg-slate-50 rounded p-2">board h = height + 2 × overhang<br/>= {r(d.pageH)} + 2×{r(d.coverMargin)} = <strong>{n(d.boardH)}</strong></p>
+                                        <p className="bg-slate-50 rounded p-2">s = thickness + 2 × board<br/>= {r(d.blockT)} + 2×{r(d.boardT)} = <strong>{n(d.spineW)}</strong></p>
+                                        <p className="bg-slate-50 rounded p-2">g = thickness/2 + board<br/>= {r(d.blockT)}/2 + {r(d.boardT)} = <strong>{n(d.gutter)}</strong></p>
+                                        <p className="bg-slate-50 rounded p-2 sm:col-span-2">cloth w = 2 × board w + s + 2 × g + 2 × turn-in<br/>= 2×{n(d.boardW)} + {n(d.spineW)} + 2×{n(d.gutter)} + 2×{r(d.fabricMargin)} = <strong>{n(d.fabricW)}</strong></p>
                                     </div>
                                 </details>
                                 <details className="mt-2 text-sm text-slate-600">
@@ -426,7 +621,7 @@ const App = () => {
                         </Step>
 
                         <Step n="4" id="laser-cut" title="Cut on the laser" subtitle="Files are generated from the measurements above.">
-                            {valid ? <LaserCutPanel dims={d}/> : <p className="text-sm text-slate-500">Finish steps 1 and 2 to generate cut files.</p>}
+                            {valid ? <LaserCutPanel dims={d} unit={unit}/> : <p className="text-sm text-slate-500">Finish steps 1 and 2 to generate cut files.</p>}
                         </Step>
                     </div>
                 </div>
